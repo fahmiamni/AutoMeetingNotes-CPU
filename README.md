@@ -28,7 +28,7 @@ AutoMeetingNotes/
 │   ├── .batch_manifest.json        # Transcripts pending summarization
 │   └── .summarized_tracking.json   # Summaries already generated
 ├── Dockerfile                      # Container image (python:3.12-slim + ffmpeg)
-├── docker-compose.yml              # Two services: transcriber → summarizer
+├── docker-compose.yml              # Long-running input-folder worker
 ├── .env.example                    # Configuration template
 ├── main.bat                        # Windows launcher (venv Python)
 ├── main.py                         # Orchestrator — runs the full pipeline
@@ -97,34 +97,38 @@ Full list of optional environment variables:
 ### Local (Windows)
 
 1. Drop your meeting audio (`.mp3`, `.m4a`, `.wav`, `.ogg`, `.mp4`) into the folder set by `INPUT_DIR` (default: `./input`)
-2. Run `main.bat` (or `python main.py`)
+2. Run `main.bat` (or `python main.py`). Add `--watch` to keep the local process
+   waiting for new audio files.
 
 ### Docker
 
 1. Set `INPUT_DIR` in `.env` to the **absolute host path** containing your audio files
-2. Run:
+2. Start the worker:
 
 ```bash
 docker compose build
-docker compose up
+docker compose up -d
 ```
 
-The `transcriber` service runs stage 1 with your audio folder mounted at `/app/input`; the `summarizer` service runs stage 2 once transcription completes successfully. Transcripts, summaries, and tracking state live in the shared `pipeline-output` volume, and the Whisper model cache persists in the `hf-cache` volume across runs.
+The `worker` stays running and checks the mounted `/app/input` folder every 5 seconds. The input mount is writable inside the container. The worker waits until a new audio file has stopped changing for 10 seconds, then transcribes and summarizes it. Already-processed files are skipped. These timings can be adjusted with `WATCH_POLL_SECONDS` and `WATCH_STABLE_SECONDS`.
 
-To view generated files from the volume:
+View worker logs with `docker compose logs -f worker`. Stop it with `docker compose down`. Transcripts, summaries, and tracking state live in the shared `pipeline-output` volume, and the Whisper model cache persists in the `hf-cache` volume across restarts.
+
+To copy generated files from the volume:
 
 ```bash
-docker compose cp summarizer:/app/output ./output-docker
+docker compose cp worker:/app/output ./output-docker
 ```
 
-### ⚠️ The `input` folder is locked (Linux)
+### Input folder permissions (Linux)
 
-If `input/` does not exist when you first run `docker compose up`, the Docker daemon creates it as **root**, and your user can't write to it (a lock icon in your file manager). Two ways to avoid this:
+The container does not change host folder permissions. If the folder became root-owned during an earlier run, restore ownership on the host input folder so your user can add files. For the default `./input` folder, run this from the repository directory:
 
-- **Recommended:** create the folder yourself before the first run — `mkdir -p input`. A clone of this repo already includes `input/.gitkeep`, so the folder exists and is owned by you; no action needed.
-- **Fix an already-locked folder:** `sudo chown $USER:$USER input`
+```bash
+sudo chown -R "$(id -u):$(id -g)" input
+```
 
-Don't delete and recreate `input/` with `sudo` — that recreates it as root-owned.
+If `INPUT_DIR` in `.env` points to a different folder, use that host folder path instead.
 
 The pipeline will automatically:
 - Transcribe each new audio file → `output/latest/02_transcription.md` + `output/transcripts/{name}.md`
