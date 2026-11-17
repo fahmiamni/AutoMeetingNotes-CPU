@@ -14,6 +14,7 @@ BATCH_MANIFEST = Path('output/.batch_manifest.json')
 
 def run_step(script_name: str, extra_env: dict[str, str] | None = None) -> None:
     """Run each pipeline step in a fresh process so GPU memory is released."""
+    print("-" * 100)
     print(f"Running {script_name}...")
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -112,4 +113,5 @@ if __name__ == "__main__":
     else:
         run_step("01_transcribe.py")
         run_step("02_summarize_or.py")
+    print("-" * 100)
 
