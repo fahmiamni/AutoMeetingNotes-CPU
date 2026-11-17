@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import markdown
@@ -9,6 +10,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 MATON_BASE_URL = 'https://api.maton.ai'
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+MAX_RETRIES = 5
+BASE_DELAY_SECONDS = 2.0
 
 
 def _maton_headers() -> dict:
@@ -21,6 +25,30 @@ def _maton_headers() -> dict:
     return {
         'Authorization': f'Bearer {api_key}',
     }
+
+
+def _maton_request(method: str, url: str, **kwargs) -> requests.Response:
+    """Send a request to the Maton API, retrying on 429 and transient 5xx."""
+    timeout = kwargs.pop('timeout', 30)
+    for attempt in range(MAX_RETRIES):
+        resp = requests.request(method, url, timeout=timeout, **kwargs)
+        if resp.status_code not in RETRYABLE_STATUS_CODES:
+            return resp
+
+        if attempt < MAX_RETRIES - 1:
+            retry_after = resp.headers.get('Retry-After')
+            if retry_after and retry_after.isdigit():
+                delay = float(retry_after)
+            else:
+                delay = BASE_DELAY_SECONDS * (2 ** attempt)
+            delay = min(delay, 60.0)
+            print(
+                f"  Maton API {resp.status_code} on {url}; "
+                f"retrying in {delay:.0f}s (attempt {attempt + 1}/{MAX_RETRIES})..."
+            )
+            time.sleep(delay)
+
+    return resp
 
 
 def _resolve_section_id() -> str:
@@ -37,11 +65,7 @@ def _resolve_section_id() -> str:
     headers = _maton_headers()
 
     # List notebooks
-    resp = requests.get(
-        f'{MATON_BASE_URL}/one-note/v1.0/me/onenote/notebooks',
-        headers=headers,
-        timeout=30,
-    )
+    resp = _maton_request('GET', f'{MATON_BASE_URL}/one-note/v1.0/me/onenote/notebooks', headers=headers)
     if resp.status_code != 200:
         raise SystemExit(f"Maton API error listing notebooks {resp.status_code}: {resp.text}")
 
@@ -57,7 +81,7 @@ def _resolve_section_id() -> str:
     # List sections in the notebook (use Maton gateway URL, not raw Graph URL)
     notebook_id = notebook.get('id', '')
     sections_url = f'{MATON_BASE_URL}/one-note/v1.0/me/onenote/notebooks/{notebook_id}/sections'
-    resp = requests.get(sections_url, headers=headers, timeout=30)
+    resp = _maton_request('GET', sections_url, headers=headers)
     if resp.status_code != 200:
         raise SystemExit(f"Maton API error listing sections {resp.status_code}: {resp.text}")
 
@@ -98,11 +122,11 @@ def save_to_onenote(content: str, title: str) -> str | None:
         section_id = _resolve_section_id()
         html = _markdown_to_onenote_html(title, content)
 
-        resp = requests.post(
+        resp = _maton_request(
+            'POST',
             f'{MATON_BASE_URL}/one-note/v1.0/me/onenote/sections/{section_id}/pages',
             headers={**_maton_headers(), 'Content-Type': 'text/html'},
             data=html.encode('utf-8'),
-            timeout=30,
         )
         if resp.status_code not in (200, 201):
             print(f"  Warning: OneNote save failed ({resp.status_code}): {resp.text}")
